@@ -3,9 +3,39 @@ import Ticket from "../models/Ticket.js";
 import Alert from "../models/Alert.js";
 import User from "../models/User.js";
 import Society from "../models/Society.js";
-import Staff from "../../../gosociety_auth/src/models/Staff.js";
-import Admin from "../../../gosociety_auth/src/models/Admin.js";
+import Staff from "../models/Staff.js";
+import Admin from "../models/Admin.js";
 
+
+// Helper to trigger push notifications via Infra Service
+const maskToken = (t) => t ? `${t.substring(0, 12)}...${t.slice(-8)}` : 'null';
+
+const triggerPushNotification = async (token, title, body, data, userId, societyId) => {
+    try {
+        const INFRA_URL = process.env.INFRA_URL || "http://localhost:5003";
+        console.log(`[Notification] Triggering push | INFRA_URL: ${INFRA_URL} | userId: ${userId} | societyId: ${societyId} | token: ${maskToken(token)}`);
+        const response = await fetch(`${INFRA_URL}/notifications/push`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ token, title, body, data, userId, societyId })
+        });
+        
+        let result;
+        try {
+            result = await response.json();
+        } catch (e) {
+            result = { error: "Failed to parse JSON response" };
+        }
+
+        if (!response.ok) {
+            console.error(`[Notification] Infra returned error | status: ${response.status} | userId: ${userId} | error:`, result?.error || result);
+        } else {
+            console.log(`[Notification] Sent to ${userId} | messageId:`, result?.response);
+        }
+    } catch (error) {
+        console.error("[Notification] Failed to trigger push:", error.message);
+    }
+};
 
 /**
  * GET /operations/dashboard
@@ -663,7 +693,7 @@ export const createWalkInVisitor = async (req, res) => {
 
     const visitor = new Visitor({
       societyId,
-      type,
+      type: type?.toLowerCase(),
       fName,
       mobile: mobile || null,
       vehicleNumber: vehicleNumber || null,
@@ -781,19 +811,7 @@ export const checkPreApprovedGuest = async (req, res) => {
     }
 };
 
-const triggerPushNotification = async (token, title, body, data, userId, societyId) => {
-    try {
-        const INFRA_URL = process.env.INFRA_URL || "http://localhost:5003";
-        await fetch(`${INFRA_URL}/notifications/push`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ token, title, body, data, userId, societyId })
-        });
-        console.log(`[Notification] Pushed to ${userId}`);
-    } catch (error) {
-        console.error("[Notification] Failed to trigger push:", error.message);
-    }
-};
+
 
 /**
  * POST /operations/visitors/request-approval
@@ -823,7 +841,7 @@ export const requestVisitorApproval = async (req, res) => {
 
         const visitorData = {
             societyId,
-            type: visitorType,
+            type: visitorType?.toLowerCase(),
             fName,
             mobile: mobile || null,
             guestCount: guestCount || 1,
@@ -847,6 +865,7 @@ export const requestVisitorApproval = async (req, res) => {
         console.log("[requestVisitorApproval] Post-save document flat/block:", { flat: visitor.flat, block: visitor.block });
 
         // Trigger Notification if hostUser has a token
+        console.log(`[requestVisitorApproval] Host found: ${hostUser?.displayName}, Token status: ${hostUser?.notificationToken ? 'Present' : 'MISSING'}`);
         if (hostUser && hostUser.notificationToken) {
             triggerPushNotification(
                 hostUser.notificationToken,
@@ -863,6 +882,8 @@ export const requestVisitorApproval = async (req, res) => {
                 hostUser._id,
                 societyId
             );
+        } else if (hostUser) {
+            console.warn(`[requestVisitorApproval] No notification token found for host ${hostUser._id}. Notification skipped.`);
         }
 
         res.status(201).json({ 
@@ -1107,10 +1128,34 @@ export const verifyPassCode = async (req, res) => {
             passCode,
             status: "approved",
             entryTime: null
-        }).populate("hostUserId", "displayName profile.flat profile.tower");
+        });
 
         if (!visitor) {
             return res.status(404).json({ message: "Invalid or expired pass code." });
+        }
+
+        // Manually fetch host user since they are in different databases (people vs operations)
+        let hostUser = null;
+        if (visitor.hostUserId) {
+            try {
+                hostUser = await User.findById(visitor.hostUserId);
+            } catch (err) {
+                console.error("Error fetching host user:", err);
+            }
+        }
+
+        console.log("[verifyPassCode] Visitor found:", {
+            id: visitor._id,
+            name: visitor.fName,
+            hostUserId: visitor.hostUserId
+        });
+        
+        if (hostUser) {
+             console.log("[verifyPassCode] Host User Data (Manual Fetch):", {
+                displayName: hostUser.displayName,
+                profileFlat: hostUser.profile?.flat,
+                profileTower: hostUser.profile?.tower
+            });
         }
 
         // Mark Entry Immediately
@@ -1118,9 +1163,9 @@ export const verifyPassCode = async (req, res) => {
         await visitor.save();
 
         // Trigger Notification to Host
-        if (visitor.hostUserId && visitor.hostUserId.notificationToken) {
+        if (hostUser && hostUser.notificationToken) {
             triggerPushNotification(
-                visitor.hostUserId.notificationToken,
+                hostUser.notificationToken,
                 "Guest Arrived",
                 `${visitor.fName} has entered the society.`,
                 { 
@@ -1129,7 +1174,7 @@ export const verifyPassCode = async (req, res) => {
                     fName: visitor.fName,
                     visitorType: visitor.type,
                 },
-                visitor.hostUserId._id,
+                hostUser._id,
                 societyId
             );
         }
@@ -1140,12 +1185,14 @@ export const verifyPassCode = async (req, res) => {
                 id: visitor._id,
                 name: visitor.fName,
                 type: visitor.type,
-                host: visitor.hostUserId ? visitor.hostUserId.displayName : "Unknown",
-                flat: visitor.hostUserId?.profile?.flat || "N/A"
+                host: hostUser ? hostUser.displayName : "Unknown",
+                flat: hostUser?.profile?.flat || visitor.flat || "N/A",
+                block: hostUser?.profile?.tower || visitor.block || "N/A"
             }
         });
 
     } catch (error) {
+        console.error("API verifyPassCode error:", error);
         res.status(500).json({ error: error.message });
     }
 };

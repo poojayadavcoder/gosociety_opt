@@ -15,9 +15,13 @@ const userSchema = new mongoose.Schema({
     required: true,
     unique: true
   },
-  flat: String,
-  tower: String,
-  floor: String,
+  profile: {
+    tower: { type: String },
+    flat: { type: String },
+    floor: { type: Number },
+    alternateMobile: { type: String, trim: true },
+    dob: { type: Date }
+  },
   societyId: {
     type: String,
     required: true
@@ -27,7 +31,6 @@ const userSchema = new mongoose.Schema({
     trim: true
   },
   status: String
-
 }, {
   timestamps: true,
   collection: "users" // Explicitly map to 'users' collection in people DB
