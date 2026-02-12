@@ -473,7 +473,36 @@ export const getSocietyVisitors = async (req, res) => {
     
     const visitors = await Visitor.find({
       societyId: societyId
-    }).sort({ createdAt: -1 });
+    }).sort({ createdAt: -1 }).lean();
+
+    // Manually populate hostUserId
+    const hostUserIds = [...new Set(visitors.map(v => v.hostUserId).filter(id => id && id !== 'SYSTEM_UNASSIGNED'))];
+    
+    if (hostUserIds.length > 0) {
+        const users = await User.find({ _id: { $in: hostUserIds } })
+            .select('displayName profile mobile')
+            .lean();
+            
+        const userMap = users.reduce((acc, user) => {
+            acc[user._id] = user;
+            return acc;
+        }, {});
+        
+        // Attach user details to visitors
+        visitors.forEach(visitor => {
+            if (visitor.hostUserId && userMap[visitor.hostUserId]) {
+                const host = userMap[visitor.hostUserId];
+                // Replace hostUserId string with object as expected by some queries or just add populated field
+                // BUT better to keep consistent with other endpoints if they populate.
+                // The frontend likely expects `hostUserId` to be an object with `profile` for `hostUserId.profile.flat`
+                visitor.hostUserId = host; 
+                
+                // Also ensure flat/block are set at top level if missing
+                if (!visitor.flat) visitor.flat = host.profile?.flat || host.flat;
+                if (!visitor.block) visitor.block = host.profile?.tower || host.block || host.tower;
+            }
+        });
+    }
 
     if (visitors.length > 0) {
         console.log("[getSocietyVisitors] First visitor raw snapshot:", {
@@ -481,7 +510,7 @@ export const getSocietyVisitors = async (req, res) => {
             fName: visitors[0].fName,
             flat: visitors[0].flat,
             block: visitors[0].block,
-            hasFlatField: Object.prototype.hasOwnProperty.call(visitors[0].toObject(), 'flat')
+            hostName: visitors[0].hostUserId?.displayName
         });
     }
 
